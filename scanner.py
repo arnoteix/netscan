@@ -5,62 +5,72 @@ Auteur : Arno Teixeira
 Commentaire : Petit outil de scan réseau pour apprentissage.
 """
 
-from scapy.all import ARP, Ether, srp
-import socket
-import json
 import os
+import json
+from scapy.all import ARP, Ether, srp, TCP, IP, sr1
+import networkx as nx
+import matplotlib.pyplot as plt
 
-# ----------- CONFIGURATION -----------
-IP_RANGE = "192.168.1.0/24"  # Plage réseau à scanner
-COMMON_PORTS = [22, 80, 443, 8080]  # Ports TCP à tester
-OUTPUT_FILE = "output/results.json"
-# --------------------------------------
+IP_RANGE = "192.168.1.1/24"
+OUTPUT_DIR = "output"
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "results.json")
 
 def scan_hosts(ip_range):
-    """Scanne une plage réseau pour trouver les hôtes actifs."""
+    print("[*] Scan du réseau en cours...")
+    # Création du paquet ARP
     arp = ARP(pdst=ip_range)
     ether = Ether(dst="ff:ff:ff:ff:ff:ff")
     packet = ether / arp
 
+    # Envoi du paquet et réception des réponses
     result = srp(packet, timeout=2, verbose=0)[0]
 
     devices = []
-    for _, received in result:
-        devices.append({'ip': received.psrc, 'mac': received.hwsrc})
+    for sent, received in result:
+        devices.append({'ip': received.psrc, 'mac': received.hwsrc, 'open_ports': []})
     return devices
 
-def scan_ports(ip, ports):
-    """Teste les ports TCP ouverts sur une IP donnée."""
-    open_ports = []
-    for port in ports:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.5)
-        try:
-            result = s.connect_ex((ip, port))
-            if result == 0:
-                open_ports.append(port)
-        except socket.error:
-            pass
-        finally:
-            s.close()
-    return open_ports
+def scan_ports(devices, ports=[80, 443]):
+    print("[*] Scan des ports des hôtes...")
+    for device in devices:
+        for port in ports:
+            pkt = IP(dst=device['ip'])/TCP(dport=port, flags="S")
+            resp = sr1(pkt, timeout=1, verbose=0)
+            if resp and resp.haslayer(TCP):
+                if resp.getlayer(TCP).flags == 0x12:  # SYN-ACK reçu
+                    device['open_ports'].append(port)
+    return devices
 
-def save_results(devices, file_path):
-    """Enregistre les résultats au format JSON."""
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, "w") as f:
+def save_results(devices, filename):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(filename, 'w') as f:
         json.dump(devices, f, indent=4)
-    print(f"[+] Résultats sauvegardés dans {file_path}")
+    print(f"[+] Résultats sauvegardés dans {filename}")
+
+def draw_network(devices):
+    G = nx.Graph()
+    G.add_node("Scanner", color="red")
+
+    for dev in devices:
+        label = f"{dev['ip']}\n{dev['mac']}"
+        if dev['open_ports']:
+            label += f"\nPorts: {', '.join(map(str, dev['open_ports']))}"
+        G.add_node(label)
+        G.add_edge("Scanner", label)
+
+    pos = nx.spring_layout(G, seed=42)
+    nx.draw(G, pos, with_labels=True, node_color="lightblue", node_size=2000, font_size=8)
+    plt.title("Carte réseau détectée")
+    plt.tight_layout()
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    plt.savefig(os.path.join(OUTPUT_DIR, "network.png"), dpi=300)
+    plt.close()
+    print("[+] Carte réseau enregistrée dans output/network.png")
 
 if __name__ == "__main__":
-    print("[*] Scan du réseau en cours...")
     devices = scan_hosts(IP_RANGE)
-
-    print(f"[+] {len(devices)} hôte(s) trouvé(s) :")
-    for device in devices:
-        open_ports = scan_ports(device['ip'], COMMON_PORTS)
-        device['open_ports'] = open_ports
-        print(f" - {device['ip']} ({device['mac']}) → Ports ouverts: {open_ports if open_ports else 'Aucun'}")
-
+    devices = scan_ports(devices)
     save_results(devices, OUTPUT_FILE)
+    draw_network(devices)
     print("[✓] Scan terminé !")
